@@ -1,105 +1,124 @@
-# app/pipeline/worker.py
+"""
+Worker pipeline:
+- Fetch Pending claims
+- Run static_eval (technical + medical rules)
+- (Optional) call llm_client for explanations
+- Update master_claims, insert claim_errors, compute claim_metrics
+"""
+
 from sqlalchemy.orm import Session
 from ..db import SessionLocal
 from .. import models
 from .static_eval import load_rules, evaluate_claim
 from .llm_client import explain_with_llm
-from ..db_utils import upsert
-import os
-import json
+import datetime
 
 def run_validation(job_id: str, tenant: str):
-    """
-    RQ worker entrypoint: validates pending claims for tenant using static rules and LLM enrichment.
-    """
-    print(f"[Worker] Starting validation job {job_id} for tenant {tenant}")
+    print(f"[Worker] Running validation job {job_id} for tenant {tenant}")
+
     db: Session = SessionLocal()
     try:
-        # load tenant rules (or default)
+        # Load rules (parsed from uploaded files)
         rules = load_rules(tenant)
 
-        # fetch claims inserted as Pending (worker handles all tenants but we use tenant-naming via rules files)
-        pending = db.query(models.MasterClaim).filter(models.MasterClaim.status == "Pending").all()
+        # Fetch pending claims
+        pending_claims = db.query(models.MasterClaim).filter(models.MasterClaim.status == "Pending").all()
+        print(f"[Worker] Found {len(pending_claims)} pending claims.")
 
-        # clear claim_errors for these claims so re-run idempotent
-        for c in pending:
-            db.query(models.ClaimError).filter(models.ClaimError.claim_id == c.claim_id).delete()
-        db.commit()
-
-        for c in pending:
-            # Build claim dict for static evaluation
+        for claim in pending_claims:
             claim_dict = {
-                "claim_id": c.claim_id,
-                "encounter_type": c.encounter_type,
-                "service_date": c.service_date,
-                "national_id": c.national_id,
-                "member_id": c.member_id,
-                "facility_id": c.facility_id,
-                "unique_id": c.unique_id,
-                "diagnosis_codes": c.diagnosis_codes,
-                "service_code": c.service_code,
-                "paid_amount_aed": c.paid_amount_aed,
-                "approval_number": c.approval_number
+                "claim_id": claim.claim_id,
+                "encounter_type": claim.encounter_type,
+                "service_date": claim.service_date,
+                "national_id": claim.national_id,
+                "member_id": claim.member_id,
+                "facility_id": claim.facility_id,
+                "unique_id": claim.unique_id,
+                "diagnosis_codes": (claim.diagnosis_codes or "").split(";"),
+                "service_code": claim.service_code,
+                "paid_amount_aed": claim.paid_amount_aed,
+                "approval_number": claim.approval_number,
             }
 
-            # Evaluate static rules
+            # --- Run static rule evaluation ---
             errors = evaluate_claim(claim_dict, rules)
 
+            # --- Optionally enrich with LLM ---
             if errors:
-                # Determine error_type: technical / medical / both
-                cats = {e.get("category") for e in errors}
-                err_type = "Both" if len(cats) > 1 else (f"{list(cats)[0].capitalize()} error" if len(cats)==1 else "Technical error")
-                c.status = "Not validated"
-                c.error_type = err_type
+                llm_explanations = explain_with_llm(claim_dict, errors)
+                # merge LLM text into explanations
+                for i, err in enumerate(errors):
+                    if i < len(llm_explanations):
+                        err["message"] += f" | LLM says: {llm_explanations[i]}"
 
-                # insert ClaimError rows
-                for e in errors:
+            # --- Update DB ---
+            if errors:
+                claim.status = "Not validated"
+                categories = {err["category"] for err in errors}
+                if len(categories) == 1:
+                    claim.error_type = f"{list(categories)[0].capitalize()} error"
+                else:
+                    claim.error_type = "Both"
+
+                claim.error_explanation = [err["message"] for err in errors]
+                claim.recommended_action = "; ".join({err["recommendation"] for err in errors})
+
+                # Insert into claim_errors
+                for err in errors:
                     ce = models.ClaimError(
-                        claim_id=c.claim_id,
-                        rule_id=e.get("rule_id"),
-                        message=e.get("message"),
-                        recommendation=e.get("recommendation")
+                        claim_id=claim.claim_id,
+                        rule_id=err["rule_id"],
+                        message=err["message"],
+                        recommendation=err["recommendation"],
                     )
                     db.add(ce)
 
-                # LLM enrichment (optional)
-                llm_out = explain_with_llm(claim_dict, errors)
-                c.error_explanation = llm_out.get("bullets", [e["message"] for e in errors])
-                c.recommended_action = llm_out.get("recommendation", "; ".join({e["recommendation"] for e in errors}))
-
             else:
-                c.status = "Validated"
-                c.error_type = "No error"
-                c.error_explanation = []
-                c.recommended_action = "No action needed."
+                claim.status = "Validated"
+                claim.error_type = "No error"
+                claim.error_explanation = []
+                claim.recommended_action = "No action needed."
 
-            upsert(db, c)
-            db.commit()
+            db.add(claim)
 
-        # Recompute metrics table
+        db.commit()
+
+        # --- Compute metrics for charts ---
         _compute_metrics(db)
 
-        print(f"[Worker] Validation job {job_id} complete.")
-    except Exception as ex:
-        print("[Worker] ERROR:", ex)
+        print("[Worker] Validation complete.")
+
+    except Exception as e:
+        print(f"[Worker] ERROR: {e}")
     finally:
         db.close()
 
+
 def _compute_metrics(db: Session):
-    # Clear metrics table and aggregate counts and paid sums by error_type
-    db.query(models.ClaimMetrics).delete()
+    """Aggregate metrics and store in claim_metrics."""
+    db.query(models.ClaimMetrics).delete()  # reset metrics
     db.commit()
 
-    rows = db.query(models.MasterClaim.error_type, models.MasterClaim.paid_amount_aed).all()
+    results = db.query(
+        models.MasterClaim.error_type,
+        models.MasterClaim.status,
+        models.MasterClaim.paid_amount_aed
+    ).all()
+
     metrics = {}
-    for err_type, paid in rows:
-        cat = err_type or "No error"
+    for error_type, status, paid in results:
+        cat = error_type or "No error"
         if cat not in metrics:
             metrics[cat] = {"count": 0, "paid": 0.0}
         metrics[cat]["count"] += 1
-        metrics[cat]["paid"] += (paid or 0.0)
+        metrics[cat]["paid"] += paid or 0.0
 
-    for cat, values in metrics.items():
-        m = models.ClaimMetrics(category=cat, count=values["count"], paid=values["paid"])
+    for cat, vals in metrics.items():
+        m = models.ClaimMetrics(
+            category=cat,
+            count=vals["count"],
+            paid=vals["paid"]
+        )
         db.add(m)
+
     db.commit()
