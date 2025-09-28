@@ -1,0 +1,28 @@
+[
+    {
+        "rule_id": "TECH001",
+        "category": "technical",
+        "field": "paid_amount_aed",
+        "op": ">",
+        "value": 250,
+        "conditions": [
+            {
+                "field": "approval_number",
+                "op": "is_null"
+            }
+        ],
+        "message": "Paid amount > AED 250 but no approval number",
+        "recommendation": "Request prior approval and re-submit claim with approval number.",
+        "enabled": true
+    },
+    {
+        "rule_id": "TECH002",
+        "category": "technical",
+        "field": "unique_id",
+        "op": "is_null",
+        "value": null,
+        "message": "Unique ID is missing",
+        "recommendation": "Ensure each claim has a valid unique_id before submission.",
+        "enabled": true
+    }
+]

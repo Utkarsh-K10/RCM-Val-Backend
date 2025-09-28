@@ -1,0 +1,34 @@
+[
+    {
+        "rule_id": "MED001",
+        "category": "medical",
+        "field": "diagnosis_codes",
+        "op": "in",
+        "value": [
+            "A01",
+            "B02"
+        ],
+        "message": "Diagnosis code requires supporting documentation",
+        "recommendation": "Attach lab report or documentation for diagnosis code.",
+        "enabled": true
+    },
+    {
+        "rule_id": "MED002",
+        "category": "medical",
+        "field": "service_code",
+        "op": "==",
+        "value": "XRAY",
+        "conditions": [
+            {
+                "field": "diagnosis_codes",
+                "op": "not_in",
+                "value": [
+                    "R93"
+                ]
+            }
+        ],
+        "message": "X-Ray service code missing valid diagnosis",
+        "recommendation": "Include valid diagnosis code (e.g., R93) for X-Ray claims.",
+        "enabled": true
+    }
+]

@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.sqlite3
+
+# Virtual environment
+venv/
+.env
+
+# IDE / Editor
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Migrations cache
+migrations/versions/__pycache__/
+
+# Logs
+*.log
+
+# Cache / Temp
+*.egg-info/
+dist/
+build/
+.cache/
