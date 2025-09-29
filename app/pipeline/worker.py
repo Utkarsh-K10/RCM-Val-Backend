@@ -1,11 +1,3 @@
-"""
-Worker pipeline:
-- Fetch Pending claims
-- Run static_eval (technical + medical rules)
-- (Optional) call llm_client for explanations
-- Update master_claims, insert claim_errors, compute claim_metrics
-"""
-
 from sqlalchemy.orm import Session
 from ..db import SessionLocal
 from .. import models
