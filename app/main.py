@@ -1,8 +1,24 @@
 from fastapi import FastAPI
 from .db import engine, Base # Import engine and Base from your db.py
 from .routes import auth, admin, upload, claims, metrics
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="Mini RCM Validation Engine")
+
+
+
+# CORS configuration
+origins = [
+    "http://localhost:5173",
+    "http://localhost:8000"
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Add a startup event handler to create the database tables
 @app.on_event("startup")
